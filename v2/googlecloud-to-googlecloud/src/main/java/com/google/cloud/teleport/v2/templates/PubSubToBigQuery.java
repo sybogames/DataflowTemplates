@@ -51,15 +51,13 @@ import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessageWithAttributesCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.Flatten;
-import org.apache.beam.sdk.transforms.MapElements;
-import org.apache.beam.sdk.transforms.PTransform;
-import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.PCollectionList;
-import org.apache.beam.sdk.values.PCollectionTuple;
-import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.transforms.*;
+import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
+import org.apache.beam.sdk.transforms.windowing.FixedWindows;
+import org.apache.beam.sdk.transforms.windowing.Repeatedly;
+import org.apache.beam.sdk.transforms.windowing.Window;
+import org.apache.beam.sdk.values.*;
+import org.joda.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -242,6 +240,8 @@ public class PubSubToBigQuery {
      */
 
     PCollection<PubsubMessage> messages = null;
+    PCollection<PubsubMessage> qa_users = null;
+
     if (useInputSubscription) {
       messages =
           pipeline.apply(
@@ -255,6 +255,20 @@ public class PubSubToBigQuery {
               PubsubIO.readMessagesWithAttributes().fromTopic(options.getInputTopic()));
     }
 
+    // Read from BigQuery table periodically
+    PCollection<TableRow> rows = pipeline
+            .apply("ReadFromBigQuery", BigQueryIO.readTableRows()
+                    .fromQuery("SELECT * FROM `table`")
+                    .withoutValidation())
+            .apply("TriggerPeriodically", Window.<TableRow>into(FixedWindows.of(Duration.standardMinutes(1)))
+                    .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(60))))
+                    .withAllowedLateness(Duration.ZERO)
+                    .discardingFiredPanes());
+
+    // Create a PCollectionView of the filtered rows
+    PCollectionView<Iterable<TableRow>> filteredRowsView = rows
+            .apply("CreateFilteredRowsView", View.asIterable());
+
     PCollectionTuple convertedTableRows =
         messages
             /*
@@ -262,12 +276,32 @@ public class PubSubToBigQuery {
              */
             .apply("ConvertMessageToTableRow", new PubsubMessageToTableRow(options));
 
+    // Merge the filtered rows with the existing pipeline
+    PCollection<TableRow> mergedRows = convertedTableRows.get(TRANSFORM_OUT)
+            .apply("MergeWithFilteredRows", ParDo.of(new DoFn<TableRow, TableRow>() {
+              @ProcessElement
+              public void processElement(ProcessContext c) {
+                TableRow inputRow = c.element();
+                Iterable<TableRow> filteredRows = c.sideInput(filteredRowsView);
+
+                // Perform the merging logic here
+                // Example: Enrich the input row with data from the filtered rows
+                for (TableRow filteredRow : filteredRows) {
+                  if (filteredRow.get("id").equals(inputRow.get("id"))) {
+                    inputRow.putAll(filteredRow);
+                    break;
+                  }
+                }
+
+                c.output(inputRow);
+              }
+            }).withSideInputs(filteredRowsView));
+
     /*
      * Step #3: Write the successful records out to BigQuery
      */
     WriteResult writeResult =
-        convertedTableRows
-            .get(TRANSFORM_OUT)
+            mergedRows
             .apply(
                 "WriteSuccessfulRecords",
                 BigQueryIO.writeTableRows()
