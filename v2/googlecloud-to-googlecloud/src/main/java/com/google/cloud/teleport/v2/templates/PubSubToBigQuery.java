@@ -284,8 +284,6 @@ public class PubSubToBigQuery {
                 TableRow inputRow = c.element();
                 Iterable<TableRow> filteredRows = c.sideInput(filteredRowsView);
 
-                // Perform the merging logic here
-                // Example: Enrich the input row with data from the filtered rows
                 for (TableRow filteredRow : filteredRows) {
                   if (filteredRow.get("id").equals(inputRow.get("id"))) {
                     inputRow.putAll(filteredRow);
