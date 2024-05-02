@@ -24,6 +24,7 @@ import com.google.cloud.teleport.v2.coders.FailsafeElementCoder;
 import com.google.cloud.teleport.v2.templates.PubSubToBigQuery.PubsubMessageToTableRow;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Resources;
+import java.io.Serializable;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
@@ -46,64 +47,66 @@ import org.junit.Rule;
 import org.junit.Test;
 
 /** Test cases for the {@link PubSubToBigQuery} class. */
-public class PubsubToBigQueryTest {
+public class PubsubToBigQueryTest implements Serializable {
 
-  @Rule public final transient TestPipeline pipeline = TestPipeline.create();
+    private static final long serialVersionUID = 1L;
 
-  private static final String RESOURCES_DIR = "JavascriptTextTransformerTest/";
+    @Rule public final transient TestPipeline pipeline = TestPipeline.create();
 
-  private static final String TRANSFORM_FILE_PATH =
-      Resources.getResource(RESOURCES_DIR + "transform.js").getPath();
+    private static final String RESOURCES_DIR = "JavascriptTextTransformerTest/";
 
-  /** Tests the {@link PubSubToBigQuery} pipeline end-to-end. */
-  @Test
-  public void testPubsubToBigQueryE2E() throws Exception {
-    // Test input
-    final String payload = "{\"ticker\": \"GOOGL\", \"price\": 1006.94, \"event_timestamp\": 1698179812609,\"revenue\":0.001400002330012, \"server_timestamp\": 1698179812994015, \"events\": \"{\\\"ad_unit\\\":\\\"banner\\\",\\\"error_code\\\":601,\\\"error_type\\\":\\\"Init() had failed\\\",\\\"revenue\\\":0.001400002330012}\"}";
-    final PubsubMessage message =
-        new PubsubMessage(payload.getBytes(), ImmutableMap.of("id", "123", "type", "custom_event"));
+    private static final String TRANSFORM_FILE_PATH =
+            Resources.getResource(RESOURCES_DIR + "transform.js").getPath();
 
-    final Instant timestamp =
-        new DateTime(2022, 2, 22, 22, 22, 22, 222, DateTimeZone.UTC).toInstant();
+    /** Tests the {@link PubSubToBigQuery} pipeline end-to-end. */
+    @Test
+    public void testPubsubToBigQueryE2E() throws Exception {
+        // Test input
+        final String payload = "{\"ticker\": \"GOOGL\", \"price\": 1006.94, \"event_timestamp\": 1698179812609,\"revenue\":0.001400002330012, \"server_timestamp\": 1698179812994015, \"events\": \"{\\\"ad_unit\\\":\\\"banner\\\",\\\"error_code\\\":601,\\\"error_type\\\":\\\"Init() had failed\\\",\\\"revenue\\\":0.001400002330012}\"}";
+        final PubsubMessage message =
+                new PubsubMessage(payload.getBytes(), ImmutableMap.of("id", "123", "type", "custom_event"));
 
-    final FailsafeElementCoder<PubsubMessage, String> coder =
-        FailsafeElementCoder.of(PubsubMessageWithAttributesCoder.of(), StringUtf8Coder.of());
+        final Instant timestamp =
+                new DateTime(2022, 2, 22, 22, 22, 22, 222, DateTimeZone.UTC).toInstant();
 
-    CoderRegistry coderRegistry = pipeline.getCoderRegistry();
-    coderRegistry.registerCoderForType(coder.getEncodedTypeDescriptor(), coder);
+        final FailsafeElementCoder<PubsubMessage, String> coder =
+                FailsafeElementCoder.of(PubsubMessageWithAttributesCoder.of(), StringUtf8Coder.of());
 
-    // Parameters
-    PubSubToBigQuery.Options options =
-        PipelineOptionsFactory.create().as(PubSubToBigQuery.Options.class);
+        CoderRegistry coderRegistry = pipeline.getCoderRegistry();
+        coderRegistry.registerCoderForType(coder.getEncodedTypeDescriptor(), coder);
 
-    // Build pipeline
-    PCollectionTuple transformOut =
-        pipeline
-            .apply(
-                "CreateInput",
-                Create.timestamped(TimestampedValue.of(message, timestamp))
-                    .withCoder(PubsubMessageWithAttributesCoder.of()))
-            .apply("ConvertMessageToTableRow", new PubsubMessageToTableRow(options));
+        // Parameters
+        PubSubToBigQuery.Options options =
+                PipelineOptionsFactory.create().as(PubSubToBigQuery.Options.class);
 
-    // Assert
-    PAssert.that(transformOut.get(PubSubToBigQuery.UDF_DEADLETTER_OUT)).empty();
-    PAssert.that(transformOut.get(PubSubToBigQuery.TRANSFORM_DEADLETTER_OUT)).empty();
-    PAssert.that(transformOut.get(PubSubToBigQuery.TRANSFORM_OUT))
-        .satisfies(
-            collection -> {
-              TableRow result = collection.iterator().next();
-              assertThat(result.get("ticker"), is(equalTo("GOOGL")));
-              assertThat(result.get("price"), is(equalTo("1006.94")));
-              assertThat(result.get("revenue"), is(equalTo("0.001400002330012")));
-              assertThat(result.get("event_timestamp"), is(equalTo("2023-10-24T20:36:52.609Z")));
-              assertThat(result.get("server_timestamp"), is(equalTo("2023-10-24T20:36:52.994015Z")));
-              assertThat(result.get("events"), is(equalTo("{\"ad_unit\":\"banner\",\"error_code\":601,\"error_type\":\"Init() had failed\",\"revenue\":0.001400002330012}")));
-              return null;
-            });
+        // Build pipeline
+        PCollectionTuple transformOut =
+                pipeline
+                        .apply(
+                                "CreateInput",
+                                Create.timestamped(TimestampedValue.of(message, timestamp))
+                                        .withCoder(PubsubMessageWithAttributesCoder.of()))
+                        .apply("ConvertMessageToTableRow", new PubsubMessageToTableRow(options));
 
-    // Execute pipeline
-    pipeline.run();
-  }
+        // Assert
+        PAssert.that(transformOut.get(PubSubToBigQuery.UDF_DEADLETTER_OUT)).empty();
+        PAssert.that(transformOut.get(PubSubToBigQuery.TRANSFORM_DEADLETTER_OUT)).empty();
+        PAssert.that(transformOut.get(PubSubToBigQuery.TRANSFORM_OUT))
+                .satisfies(
+                        collection -> {
+                            TableRow result = collection.iterator().next();
+                            assertThat(result.get("ticker"), is(equalTo("GOOGL")));
+                            assertThat(result.get("price"), is(equalTo("1006.94")));
+                            assertThat(result.get("revenue"), is(equalTo("0.001400002330012")));
+                            assertThat(result.get("event_timestamp"), is(equalTo("2023-10-24T20:36:52.609Z")));
+                            assertThat(result.get("server_timestamp"), is(equalTo("2023-10-24T20:36:52.994015Z")));
+                            assertThat(result.get("events"), is(equalTo("{\"ad_unit\":\"banner\",\"error_code\":601,\"error_type\":\"Init() had failed\",\"revenue\":0.001400002330012}")));
+                            return null;
+                        });
+
+        // Execute pipeline
+        pipeline.run();
+    }
 
     /** Tests the QA filtering logic in the PubSubToBigQuery pipeline. */
     @Test
@@ -146,21 +149,7 @@ public class PubsubToBigQueryTest {
                         .apply("ConvertMessageToTableRow", new PubsubMessageToTableRow(options));
 
         PCollection<TableRow> filteredRows = transformOut.get(PubSubToBigQuery.TRANSFORM_OUT)
-                .apply("FilterAndMergeQAUsers", ParDo.of(new DoFn<TableRow, TableRow>() {
-                    @ProcessElement
-                    public void processElement(ProcessContext c) {
-                        TableRow inputRow = c.element();
-                        Iterable<TableRow> qaUsers = c.sideInput(qaUsersView);
-
-                        for (TableRow qaUser : qaUsers) {
-                            if (qaUser.get("user_id").equals(inputRow.get("user_id"))) {
-                                inputRow.putAll(qaUser);
-                                c.output(inputRow);
-                                break;
-                            }
-                        }
-                    }
-                }).withSideInputs(qaUsersView));
+                .apply("FilterAndMergeQAUsers", ParDo.of(new FilterAndMergeQAUsersFn(qaUsersView)).withSideInputs(qaUsersView));
 
         // Assert that the merged rows include QA user data
         PAssert.that(filteredRows)
@@ -177,5 +166,30 @@ public class PubsubToBigQueryTest {
         pipeline.run();
     }
 
+    public static class FilterAndMergeQAUsersFn extends DoFn<TableRow, TableRow> implements Serializable {
+        private static final long serialVersionUID = 1L;
 
+        private final PCollectionView<Iterable<TableRow>> qaUsersView;
+
+        public FilterAndMergeQAUsersFn(PCollectionView<Iterable<TableRow>> qaUsersView) {
+            this.qaUsersView = qaUsersView;
+        }
+
+        @ProcessElement
+        public void processElement(ProcessContext c) {
+            TableRow inputRow = c.element();
+            Iterable<TableRow> qaUsers = c.sideInput(qaUsersView);
+
+            for (TableRow qaUser : qaUsers) {
+                if (qaUser.get("user_id").equals(inputRow.get("user_id"))) {
+                    // Create a new TableRow object instead of modifying the input directly
+                    TableRow outputRow = new TableRow();
+                    outputRow.putAll(inputRow);
+                    outputRow.putAll(qaUser);
+                    c.output(outputRow);
+                    break;
+                }
+            }
+        }
+    }
 }
