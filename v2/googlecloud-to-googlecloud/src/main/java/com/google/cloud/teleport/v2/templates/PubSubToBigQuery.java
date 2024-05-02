@@ -51,12 +51,21 @@ import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessageWithAttributesCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.transforms.*;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.Flatten;
+import org.apache.beam.sdk.transforms.MapElements;
+import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.Window;
-import org.apache.beam.sdk.values.*;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionList;
+import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.sdk.values.TupleTag;
 import org.joda.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -120,6 +129,8 @@ public class PubSubToBigQuery {
   /** The default suffix for error tables if dead letter table is not specified. */
   public static final String DEFAULT_DEADLETTER_TABLE_SUFFIX = "_error_records";
 
+  public static final String DEFAULT_FILTERED_DEADLETTER_TABLE_SUFFIX = "_filtered_error_records";
+
   /** Pubsub message/string coder for pipeline. */
   public static final FailsafeElementCoder<PubsubMessage, String> CODER =
       FailsafeElementCoder.of(PubsubMessageWithAttributesCoder.of(), StringUtf8Coder.of());
@@ -146,6 +157,16 @@ public class PubSubToBigQuery {
     String getOutputTableSpec();
 
     void setOutputTableSpec(String value);
+
+    @TemplateParameter.BigQueryTable(
+            order = 6,
+            description = "BigQuery filtered output table",
+            helpText =
+                    "BigQuery table location to write the filtered output to. The table’s schema must match the "
+                            + "input JSON objects.")
+    String getOutputFilteredTableSpec();
+
+    void setOutputFilteredTableSpec(String value);
 
     @TemplateParameter.PubsubTopic(
         order = 2,
@@ -179,6 +200,20 @@ public class PubSubToBigQuery {
     String getOutputDeadletterTable();
 
     void setOutputDeadletterTable(String value);
+
+    @TemplateParameter.BigQueryTable(
+            order = 5,
+            optional = true,
+            description =
+                    "Deadletter Table for filtered messages failed to reach the filtered output table (i.e., Deadletter table)",
+            helpText =
+                    "BigQuery table for failed messages. Messages failed to reach the output table for different reasons "
+                            + "(e.g., mismatched schema, malformed json) are written to this table. If it doesn't exist, it will"
+                            + " be created during pipeline execution. If not specified, \"outputTableSpec_error_records\" is used instead.")
+    String getOutputFilteredDeadletterTable();
+
+    void setOutputFilteredDeadletterTable(String value);
+
   }
 
   /**
@@ -240,7 +275,7 @@ public class PubSubToBigQuery {
      */
 
     PCollection<PubsubMessage> messages = null;
-    PCollection<PubsubMessage> qa_users = null;
+    PCollection<TableRow> qaUsers = null;
 
     if (useInputSubscription) {
       messages =
@@ -256,7 +291,7 @@ public class PubSubToBigQuery {
     }
 
     // Read from BigQuery table periodically
-    PCollection<TableRow> rows = pipeline
+    qaUsers = pipeline
             .apply("ReadFromBigQuery", BigQueryIO.readTableRows()
                     .fromQuery("SELECT * FROM `table`")
                     .withoutValidation())
@@ -266,8 +301,8 @@ public class PubSubToBigQuery {
                     .discardingFiredPanes());
 
     // Create a PCollectionView of the filtered rows
-    PCollectionView<Iterable<TableRow>> filteredRowsView = rows
-            .apply("CreateFilteredRowsView", View.asIterable());
+    PCollectionView<Iterable<TableRow>> qaUsersView = qaUsers
+            .apply("CreateQAUsersView", View.asIterable());
 
     PCollectionTuple convertedTableRows =
         messages
@@ -277,29 +312,45 @@ public class PubSubToBigQuery {
             .apply("ConvertMessageToTableRow", new PubsubMessageToTableRow(options));
 
     // Merge the filtered rows with the existing pipeline
-    PCollection<TableRow> mergedRows = convertedTableRows.get(TRANSFORM_OUT)
-            .apply("MergeWithFilteredRows", ParDo.of(new DoFn<TableRow, TableRow>() {
+    PCollection<TableRow> qaFilteredRows = convertedTableRows.get(TRANSFORM_OUT)
+            .apply("MergeWithQAUsers", ParDo.of(new DoFn<TableRow, TableRow>() {
               @ProcessElement
               public void processElement(ProcessContext c) {
                 TableRow inputRow = c.element();
-                Iterable<TableRow> filteredRows = c.sideInput(filteredRowsView);
+                Iterable<TableRow> qaUsersRow = c.sideInput(qaUsersView);
 
-                for (TableRow filteredRow : filteredRows) {
-                  if (filteredRow.get("id").equals(inputRow.get("id"))) {
-                    inputRow.putAll(filteredRow);
+                assert qaUsersRow != null;
+                for (TableRow qaUser : qaUsersRow) {
+                  if (qaUser.get("user_id").equals(inputRow.get("core.user_id"))) {
+                    inputRow.putAll(qaUser);
                     break;
                   }
                 }
 
                 c.output(inputRow);
               }
-            }).withSideInputs(filteredRowsView));
+            }).withSideInputs(qaUsersView));
+
+    /*
+     * Step #3: Write the successful records out to BigQuery
+     */
+    WriteResult filteredWriteResult =
+            qaFilteredRows
+                    .apply(
+                            "WriteSuccessfulQAFilteredRecords",
+                            BigQueryIO.writeTableRows()
+                                    .withoutValidation()
+                                    .withCreateDisposition(CreateDisposition.CREATE_NEVER)
+                                    .withWriteDisposition(WriteDisposition.WRITE_APPEND)
+                                    .withExtendedErrorInfo()
+                                    .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
+                                    .to(options.getOutputFilteredTableSpec()));
 
     /*
      * Step #3: Write the successful records out to BigQuery
      */
     WriteResult writeResult =
-            mergedRows
+            convertedTableRows.get(TRANSFORM_OUT)
             .apply(
                 "WriteSuccessfulRecords",
                 BigQueryIO.writeTableRows()
@@ -321,6 +372,14 @@ public class PubSubToBigQuery {
                 MapElements.into(FAILSAFE_ELEMENT_CODER.getEncodedTypeDescriptor())
                     .via((BigQueryInsertError e) -> wrapBigQueryInsertError(e)))
             .setCoder(FAILSAFE_ELEMENT_CODER);
+
+    PCollection<FailsafeElement<String, String>> failedFilteredInserts =
+            BigQueryIOUtils.writeResultToBigQueryInsertErrors(filteredWriteResult, options)
+                    .apply(
+                            "WrapInsertionErrors",
+                            MapElements.into(FAILSAFE_ELEMENT_CODER.getEncodedTypeDescriptor())
+                                    .via((BigQueryInsertError e) -> wrapBigQueryInsertError(e)))
+                    .setCoder(FAILSAFE_ELEMENT_CODER);
 
     /*
      * Step #4: Write records that failed table row transformation
@@ -351,6 +410,16 @@ public class PubSubToBigQuery {
                     : options.getOutputTableSpec() + DEFAULT_DEADLETTER_TABLE_SUFFIX)
             .setErrorRecordsTableSchema(ResourceUtils.getDeadletterTableSchemaJson())
             .build());
+
+    failedFilteredInserts.apply(
+            "WriteFilteredFailedRecords",
+            ErrorConverters.WriteStringMessageErrors.newBuilder()
+                    .setErrorRecordsTable(
+                            !Strings.isNullOrEmpty(options.getOutputDeadletterTable())
+                                    ? options.getOutputFilteredDeadletterTable()
+                                    : options.getOutputFilteredTableSpec() + DEFAULT_FILTERED_DEADLETTER_TABLE_SUFFIX)
+                    .setErrorRecordsTableSchema(ResourceUtils.getDeadletterTableSchemaJson())
+                    .build());
 
     return pipeline.run();
   }

@@ -32,7 +32,12 @@ import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.View;
+import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
@@ -99,4 +104,78 @@ public class PubsubToBigQueryTest {
     // Execute pipeline
     pipeline.run();
   }
+
+    /** Tests the QA filtering logic in the PubSubToBigQuery pipeline. */
+    @Test
+    public void testQAFilteringWithMatchingUser() throws Exception {
+        // Test input message mimicking real-life data
+        final String payload = "{\"user_id\": \"u123\", \"activity\": \"login\", \"timestamp\": \"2022-10-24T20:36:52Z\"}";
+        final PubsubMessage message =
+                new PubsubMessage(payload.getBytes(), ImmutableMap.of("id", "123", "type", "user_activity"));
+
+        final Instant timestamp =
+                new DateTime(2022, 10, 24, 20, 36, 52, DateTimeZone.UTC).toInstant();
+
+        // Setting up coders
+        final FailsafeElementCoder<PubsubMessage, String> coder =
+                FailsafeElementCoder.of(PubsubMessageWithAttributesCoder.of(), StringUtf8Coder.of());
+
+        CoderRegistry coderRegistry = pipeline.getCoderRegistry();
+        coderRegistry.registerCoderForType(coder.getEncodedTypeDescriptor(), coder);
+
+        // Parameters
+        PubSubToBigQuery.Options options =
+                PipelineOptionsFactory.create().as(PubSubToBigQuery.Options.class);
+
+        // Simulate QA user data that matches the 'user_id' in the incoming message
+        PCollection<TableRow> qaUsers = pipeline.apply("CreateQAUserInput", Create.<TableRow>of(
+                new TableRow().set("user_id", "u123").set("category", "premium")
+        ));
+
+        // Create a PCollectionView of the filtered rows
+        PCollectionView<Iterable<TableRow>> qaUsersView = qaUsers
+                .apply("CreateQAUsersView", View.asIterable());
+
+        // Build and execute pipeline
+        PCollectionTuple transformOut =
+                pipeline
+                        .apply(
+                                "CreateInput",
+                                Create.timestamped(TimestampedValue.of(message, timestamp))
+                                        .withCoder(PubsubMessageWithAttributesCoder.of()))
+                        .apply("ConvertMessageToTableRow", new PubsubMessageToTableRow(options));
+
+        PCollection<TableRow> filteredRows = transformOut.get(PubSubToBigQuery.TRANSFORM_OUT)
+                .apply("FilterAndMergeQAUsers", ParDo.of(new DoFn<TableRow, TableRow>() {
+                    @ProcessElement
+                    public void processElement(ProcessContext c) {
+                        TableRow inputRow = c.element();
+                        Iterable<TableRow> qaUsers = c.sideInput(qaUsersView);
+
+                        for (TableRow qaUser : qaUsers) {
+                            if (qaUser.get("user_id").equals(inputRow.get("user_id"))) {
+                                inputRow.putAll(qaUser);
+                                c.output(inputRow);
+                                break;
+                            }
+                        }
+                    }
+                }).withSideInputs(qaUsersView));
+
+        // Assert that the merged rows include QA user data
+        PAssert.that(filteredRows)
+                .satisfies(
+                        collection -> {
+                            TableRow result = collection.iterator().next();
+                            assertThat(result.get("user_id"), is(equalTo("u123")));
+                            assertThat(result.get("category"), is(equalTo("premium")));
+                            assertThat(result.get("activity"), is(equalTo("login")));
+                            return null;
+                        });
+
+        // Execute pipeline
+        pipeline.run();
+    }
+
+
 }
