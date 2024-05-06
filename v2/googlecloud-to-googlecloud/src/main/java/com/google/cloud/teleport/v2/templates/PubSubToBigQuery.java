@@ -34,7 +34,9 @@ import com.google.cloud.teleport.v2.utils.ResourceUtils;
 import com.google.cloud.teleport.v2.values.FailsafeElement;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
+import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineWorkerPoolOptions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -61,14 +63,19 @@ import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Repeatedly;
 import org.apache.beam.sdk.transforms.windowing.Window;
+import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.beam.sdk.values.TypeDescriptors;
 import org.joda.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+
 
 /**
  * The {@link PubSubToBigQuery} pipeline is a streaming pipeline which ingests data in JSON format
@@ -300,9 +307,11 @@ public class PubSubToBigQuery {
                     .withAllowedLateness(Duration.ZERO)
                     .discardingFiredPanes());
 
-    // Create a PCollectionView of the filtered rows
-    PCollectionView<Iterable<TableRow>> qaUsersView = qaUsers
-            .apply("CreateQAUsersView", View.asIterable());
+    // Create a PCollectionView of the filtered rows as a Map
+    PCollectionView<Map<String, TableRow>> qaUsersView = qaUsers
+            .apply("ExtractUserIds", MapElements.into(TypeDescriptors.kvs(TypeDescriptors.strings(), TypeDescriptor.of(TableRow.class)))
+                    .via(row -> KV.of((String) row.get("user_id"), row)))
+            .apply("CreateQAUsersView", View.asMap());
 
     PCollectionTuple convertedTableRows =
         messages
@@ -313,26 +322,10 @@ public class PubSubToBigQuery {
 
     // Merge the filtered rows with the existing pipeline
     PCollection<TableRow> qaFilteredRows = convertedTableRows.get(TRANSFORM_OUT)
-            .apply("MergeWithQAUsers", ParDo.of(new DoFn<TableRow, TableRow>() {
-              @ProcessElement
-              public void processElement(ProcessContext c) {
-                TableRow inputRow = c.element();
-                Iterable<TableRow> qaUsersRow = c.sideInput(qaUsersView);
-
-                assert qaUsersRow != null;
-                for (TableRow qaUser : qaUsersRow) {
-                  if (qaUser.get("user_id").equals(inputRow.get("core.user_id"))) {
-                    inputRow.putAll(qaUser);
-                    break;
-                  }
-                }
-
-                c.output(inputRow);
-              }
-            }).withSideInputs(qaUsersView));
+            .apply("FilterAndMergeQAUsers", ParDo.of(new FilterAndMergeQAUsersFn(qaUsersView)).withSideInputs(qaUsersView));
 
     /*
-     * Step #3: Write the successful records out to BigQuery
+     * Step #3a: Write the successful filtered records out to BigQuery
      */
     WriteResult filteredWriteResult =
             qaFilteredRows
@@ -347,7 +340,7 @@ public class PubSubToBigQuery {
                                     .to(options.getOutputFilteredTableSpec()));
 
     /*
-     * Step #3: Write the successful records out to BigQuery
+     * Step #3b: Write the successful records out to BigQuery
      */
     WriteResult writeResult =
             convertedTableRows.get(TRANSFORM_OUT)
@@ -501,6 +494,32 @@ public class PubSubToBigQuery {
       PubsubMessage message = context.element();
       context.output(
           FailsafeElement.of(message, new String(message.getPayload(), StandardCharsets.UTF_8)));
+    }
+  }
+
+  public static class FilterAndMergeQAUsersFn extends DoFn<TableRow, TableRow> implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final PCollectionView<Map<String, TableRow>> qaUsersView;
+
+    public FilterAndMergeQAUsersFn(PCollectionView<Map<String, TableRow>> qaUsersView) {
+      this.qaUsersView = qaUsersView;
+    }
+
+    @ProcessElement
+    public void processElement(ProcessContext c) {
+      TableRow inputRow = c.element();
+      Map<String, TableRow> qaUsers = c.sideInput(qaUsersView);
+
+      String userId = (String) inputRow.get("user_id");
+
+      // Check if the input row's user ID exists in the qaUsers map
+      if (qaUsers.containsKey(userId)) {
+        // Create a new TableRow object instead of modifying the input directly
+        TableRow outputRow = new TableRow();
+        outputRow.putAll(inputRow);
+        c.output(outputRow);
+      }
     }
   }
 }

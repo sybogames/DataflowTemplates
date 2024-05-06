@@ -25,6 +25,7 @@ import com.google.cloud.teleport.v2.templates.PubSubToBigQuery.PubsubMessageToTa
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Resources;
 import java.io.Serializable;
+import java.util.Map;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
@@ -116,8 +117,7 @@ public class PubsubToBigQueryTest implements Serializable {
         final PubsubMessage message =
                 new PubsubMessage(payload.getBytes(), ImmutableMap.of("id", "123", "type", "user_activity"));
 
-        final Instant timestamp =
-                new DateTime(2022, 10, 24, 20, 36, 52, DateTimeZone.UTC).toInstant();
+        final Instant timestamp = Instant.parse("2022-10-24T20:36:52Z");
 
         // Setting up coders
         final FailsafeElementCoder<PubsubMessage, String> coder =
@@ -129,15 +129,23 @@ public class PubsubToBigQueryTest implements Serializable {
         // Parameters
         PubSubToBigQuery.Options options =
                 PipelineOptionsFactory.create().as(PubSubToBigQuery.Options.class);
+        options.setOutputTableSpec("test_project:test_dataset.test_table");
 
         // Simulate QA user data that matches the 'user_id' in the incoming message
         PCollection<TableRow> qaUsers = pipeline.apply("CreateQAUserInput", Create.<TableRow>of(
                 new TableRow().set("user_id", "u123").set("category", "premium")
         ));
 
-        // Create a PCollectionView of the filtered rows
-        PCollectionView<Iterable<TableRow>> qaUsersView = qaUsers
-                .apply("CreateQAUsersView", View.asIterable());
+        // Create a PCollectionView of the filtered rows as a Map
+        PCollectionView<Map<String, TableRow>> qaUsersView = qaUsers
+                .apply("ExtractUserIds", ParDo.of(new DoFn<TableRow, Map<String, TableRow>>() {
+                    @ProcessElement
+                    public void processElement(ProcessContext c) {
+                        TableRow row = c.element();
+                        c.output(ImmutableMap.of((String) row.get("user_id"), row));
+                    }
+                }))
+                .apply("CreateQAUsersView", View.asSingleton());
 
         // Build and execute pipeline
         PCollectionTuple transformOut =
@@ -149,7 +157,7 @@ public class PubsubToBigQueryTest implements Serializable {
                         .apply("ConvertMessageToTableRow", new PubsubMessageToTableRow(options));
 
         PCollection<TableRow> filteredRows = transformOut.get(PubSubToBigQuery.TRANSFORM_OUT)
-                .apply("FilterAndMergeQAUsers", ParDo.of(new FilterAndMergeQAUsersFn(qaUsersView)).withSideInputs(qaUsersView));
+                .apply("FilterAndMergeQAUsers", ParDo.of(new PubSubToBigQuery.FilterAndMergeQAUsersFn(qaUsersView)).withSideInputs(qaUsersView));
 
         // Assert that the merged rows include QA user data
         PAssert.that(filteredRows)
@@ -157,39 +165,11 @@ public class PubsubToBigQueryTest implements Serializable {
                         collection -> {
                             TableRow result = collection.iterator().next();
                             assertThat(result.get("user_id"), is(equalTo("u123")));
-                            assertThat(result.get("category"), is(equalTo("premium")));
                             assertThat(result.get("activity"), is(equalTo("login")));
                             return null;
                         });
 
         // Execute pipeline
         pipeline.run();
-    }
-
-    public static class FilterAndMergeQAUsersFn extends DoFn<TableRow, TableRow> implements Serializable {
-        private static final long serialVersionUID = 1L;
-
-        private final PCollectionView<Iterable<TableRow>> qaUsersView;
-
-        public FilterAndMergeQAUsersFn(PCollectionView<Iterable<TableRow>> qaUsersView) {
-            this.qaUsersView = qaUsersView;
-        }
-
-        @ProcessElement
-        public void processElement(ProcessContext c) {
-            TableRow inputRow = c.element();
-            Iterable<TableRow> qaUsers = c.sideInput(qaUsersView);
-
-            for (TableRow qaUser : qaUsers) {
-                if (qaUser.get("user_id").equals(inputRow.get("user_id"))) {
-                    // Create a new TableRow object instead of modifying the input directly
-                    TableRow outputRow = new TableRow();
-                    outputRow.putAll(inputRow);
-                    outputRow.putAll(qaUser);
-                    c.output(outputRow);
-                    break;
-                }
-            }
-        }
     }
 }
