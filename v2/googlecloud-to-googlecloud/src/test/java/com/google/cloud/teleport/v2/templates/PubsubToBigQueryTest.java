@@ -24,8 +24,10 @@ import com.google.cloud.teleport.v2.coders.FailsafeElementCoder;
 import com.google.cloud.teleport.v2.templates.PubSubToBigQuery.PubsubMessageToTableRow;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Resources;
+
 import java.io.Serializable;
 import java.util.Map;
+
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
@@ -46,20 +48,29 @@ import org.joda.time.DateTimeZone;
 import org.joda.time.Instant;
 import org.junit.Rule;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/** Test cases for the {@link PubSubToBigQuery} class. */
+/**
+ * Test cases for the {@link PubSubToBigQuery} class.
+ */
 public class PubsubToBigQueryTest implements Serializable {
+    private static final Logger LOGGER = LoggerFactory.getLogger(PubsubToBigQueryTest.class);
+
 
     private static final long serialVersionUID = 1L;
 
-    @Rule public final transient TestPipeline pipeline = TestPipeline.create();
+    @Rule
+    public final transient TestPipeline pipeline = TestPipeline.create();
 
     private static final String RESOURCES_DIR = "JavascriptTextTransformerTest/";
 
     private static final String TRANSFORM_FILE_PATH =
             Resources.getResource(RESOURCES_DIR + "transform.js").getPath();
 
-    /** Tests the {@link PubSubToBigQuery} pipeline end-to-end. */
+    /**
+     * Tests the {@link PubSubToBigQuery} pipeline end-to-end.
+     */
     @Test
     public void testPubsubToBigQueryE2E() throws Exception {
         // Test input
@@ -109,11 +120,13 @@ public class PubsubToBigQueryTest implements Serializable {
         pipeline.run();
     }
 
-    /** Tests the QA filtering logic in the PubSubToBigQuery pipeline. */
+    /**
+     * Tests the QA filtering logic in the PubSubToBigQuery pipeline.
+     */
     @Test
     public void testQAFilteringWithMatchingUser() throws Exception {
         // Test input message mimicking real-life data
-        final String payload = "{\"user_id\": \"u123\", \"activity\": \"login\", \"timestamp\": \"2022-10-24T20:36:52Z\"}";
+        final String payload = "{\"core\":{\"user_id\": \"u123\"}, \"activity\": \"login\", \"timestamp\": \"2022-10-24T20:36:52Z\"}";
         final PubsubMessage message =
                 new PubsubMessage(payload.getBytes(), ImmutableMap.of("id", "123", "type", "user_activity"));
 
@@ -164,7 +177,7 @@ public class PubsubToBigQueryTest implements Serializable {
                 .satisfies(
                         collection -> {
                             TableRow result = collection.iterator().next();
-                            assertThat(result.get("user_id"), is(equalTo("u123")));
+                            assertThat(result.get("core"), is(equalTo("{\"user_id\":\"u123\"}")));
                             assertThat(result.get("activity"), is(equalTo("login")));
                             return null;
                         });
