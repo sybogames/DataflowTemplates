@@ -82,7 +82,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * The {@link PubSubToBigQuery} pipeline is a streaming pipeline which ingests data in JSON format
- * from Cloud Pub/Sub, executes a UDF, and outputs the resulting records to BigQuery. Any errors
+ * from Cloud Pub/Sub, executes a JSON transformation, and outputs the resulting records to BigQuery. Any errors
  * which occur in the transformation of the data or execution of the UDF will be output to a
  * separate errors table in BigQuery. The errors table will be created if it does not exist prior to
  * execution. Both output and error tables are specified by the user as template parameters.
@@ -178,24 +178,19 @@ public class PubSubToBigQuery {
             JavascriptTextTransformerOptions,
             BigQueryStorageApiStreamingOptions,
             DataflowPipelineWorkerPoolOptions {
+
         @TemplateParameter.BigQueryTable(
                 order = 1,
                 description = "BigQuery output table",
-                helpText =
-                        "BigQuery table location to write the output to. The table’s schema must match the "
-                                + "input JSON objects.")
+                helpText = "BigQuery table location to write the output to. The table’s schema must match the input JSON objects.")
         String getOutputTableSpec();
-
         void setOutputTableSpec(String value);
 
         @TemplateParameter.BigQueryTable(
                 order = 6,
                 description = "BigQuery filtered output table",
-                helpText =
-                        "BigQuery table location to write the filtered output to. The table’s schema must match the "
-                                + "input JSON objects.")
+                helpText = "BigQuery table location to write the filtered output to. The table’s schema must match the input JSON objects.")
         String getOutputFilteredTableSpec();
-
         void setOutputFilteredTableSpec(String value);
 
         @TemplateParameter.PubsubTopic(
@@ -204,47 +199,40 @@ public class PubSubToBigQuery {
                 description = "Input Pub/Sub topic",
                 helpText = "The Pub/Sub topic to read the input from.")
         String getInputTopic();
-
         void setInputTopic(String value);
 
         @TemplateParameter.PubsubSubscription(
                 order = 3,
                 optional = true,
                 description = "Pub/Sub input subscription",
-                helpText =
-                        "Pub/Sub subscription to read the input from, in the format of"
-                                + " 'projects/your-project-id/subscriptions/your-subscription-name'")
+                helpText = "Pub/Sub subscription to read the input from, in the format of 'projects/your-project-id/subscriptions/your-subscription-name'")
         String getInputSubscription();
-
         void setInputSubscription(String value);
 
         @TemplateParameter.BigQueryTable(
                 order = 4,
                 optional = true,
-                description =
-                        "Table for messages failed to reach the output table (i.e., Deadletter table)",
-                helpText =
-                        "BigQuery table for failed messages. Messages failed to reach the output table for different reasons "
-                                + "(e.g., mismatched schema, malformed json) are written to this table. If it doesn't exist, it will"
-                                + " be created during pipeline execution. If not specified, \"outputTableSpec_error_records\" is used instead.")
+                description = "Table for messages failed to reach the output table (i.e., Deadletter table)",
+                helpText = "BigQuery table for failed messages. Messages failed to reach the output table for different reasons (e.g., mismatched schema, malformed json) are written to this table. If it doesn't exist, it will be created during pipeline execution. If not specified, \"outputTableSpec_error_records\" is used instead.")
         String getOutputDeadletterTable();
-
         void setOutputDeadletterTable(String value);
 
         @TemplateParameter.BigQueryTable(
                 order = 5,
                 optional = true,
-                description =
-                        "Deadletter Table for filtered messages failed to reach the filtered output table (i.e., Deadletter table)",
-                helpText =
-                        "BigQuery table for failed messages. Messages failed to reach the output table for different reasons "
-                                + "(e.g., mismatched schema, malformed json) are written to this table. If it doesn't exist, it will"
-                                + " be created during pipeline execution. If not specified, \"outputTableSpec_error_records\" is used instead.")
+                description = "Deadletter Table for filtered messages failed to reach the filtered output table (i.e., Deadletter table)",
+                helpText = "BigQuery table for failed messages. Messages failed to reach the output table for different reasons (e.g., mismatched schema, malformed json) are written to this table. If it doesn't exist, it will be created during pipeline execution. If not specified, \"outputTableSpec_error_records\" is used instead.")
         String getOutputFilteredDeadletterTable();
-
         void setOutputFilteredDeadletterTable(String value);
 
+        @TemplateParameter.BigQueryTable(
+                order = 7,
+                description = "BigQuery table to query QA users",
+                helpText = "The BigQuery table to read data from periodically.")
+        String getTableToQuery();
+        void setTableToQuery(String value);
     }
+
 
     /**
      * The main entry-point for pipeline execution. This method will start the pipeline but will not
@@ -259,9 +247,6 @@ public class PubSubToBigQuery {
 
         Options options = PipelineOptionsFactory.fromArgs(args).withValidation().as(Options.class);
         BigQueryIOUtils.validateBQStorageApiOptionsStreaming(options);
-        //    options.setWorkerDiskType(
-        //
-        // "compute.googleapis.com/projects/cloud-teleport-testing/zones/us-central1-a/diskTypes/t2a-test");
 
         run(options);
     }
@@ -289,21 +274,6 @@ public class PubSubToBigQuery {
         CoderRegistry coderRegistry = pipeline.getCoderRegistry();
         coderRegistry.registerCoderForType(CODER.getEncodedTypeDescriptor(), CODER);
 
-        /*
-         * Steps:
-         *  1) Read messages in from Pub/Sub
-         *  2) Transform the PubsubMessages into TableRows
-         *     - Transform message payload via UDF
-         *     - Convert UDF result to TableRow objects
-         *  3) Write successful records out to BigQuery
-         *  4) Write failed records out to BigQuery
-         */
-
-        /*
-         * Step #1: Read messages in from Pub/Sub
-         * Either from a Subscription or Topic
-         */
-
         PCollection<PubsubMessage> messages = null;
         PCollection<TableRow> qaUsers = null;
 
@@ -320,10 +290,10 @@ public class PubSubToBigQuery {
                             PubsubIO.readMessagesWithAttributes().fromTopic(options.getInputTopic()));
         }
 
-        // Read from BigQuery table periodically
+        // Read from BigQuery table periodically using the parameter
         qaUsers = pipeline
                 .apply("ReadFromBigQuery", BigQueryIO.readTableRows()
-                        .fromQuery("SELECT * FROM `table`")
+                        .fromQuery(String.format("SELECT * FROM `%s`", options.getTableToQuery()))
                         .withoutValidation())
                 .apply("TriggerPeriodically", Window.<TableRow>into(FixedWindows.of(Duration.standardMinutes(1)))
                         .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.standardSeconds(60))))
@@ -338,18 +308,11 @@ public class PubSubToBigQuery {
 
         PCollectionTuple convertedTableRows =
                 messages
-                        /*
-                         * Step #2: Transform the PubsubMessages into TableRows
-                         */
                         .apply("ConvertMessageToTableRow", new PubsubMessageToTableRow(options));
 
-        // Merge the filtered rows with the existing pipeline
         PCollection<TableRow> qaFilteredRows = convertedTableRows.get(TRANSFORM_OUT)
                 .apply("FilterAndMergeQAUsers", ParDo.of(new FilterAndMergeQAUsersFn(qaUsersView)).withSideInputs(qaUsersView));
 
-        /*
-         * Step #3a: Write the successful filtered records out to BigQuery
-         */
         WriteResult filteredWriteResult =
                 qaFilteredRows
                         .apply(
@@ -362,9 +325,6 @@ public class PubSubToBigQuery {
                                         .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
                                         .to(options.getOutputFilteredTableSpec()));
 
-        /*
-         * Step #3b: Write the successful records out to BigQuery
-         */
         WriteResult writeResult =
                 convertedTableRows.get(TRANSFORM_OUT)
                         .apply(
@@ -377,10 +337,6 @@ public class PubSubToBigQuery {
                                         .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
                                         .to(options.getOutputTableSpec()));
 
-        /*
-         * Step 3 Contd.
-         * Elements that failed inserts into BigQuery are extracted and converted to FailsafeElement
-         */
         PCollection<FailsafeElement<String, String>> failedInserts =
                 BigQueryIOUtils.writeResultToBigQueryInsertErrors(writeResult, options)
                         .apply(
@@ -392,15 +348,11 @@ public class PubSubToBigQuery {
         PCollection<FailsafeElement<String, String>> failedFilteredInserts =
                 BigQueryIOUtils.writeResultToBigQueryInsertErrors(filteredWriteResult, options)
                         .apply(
-                                "WrapInsertionErrors",
+                                "WrapQAInsertionErrors",
                                 MapElements.into(FAILSAFE_ELEMENT_CODER.getEncodedTypeDescriptor())
                                         .via((BigQueryInsertError e) -> wrapBigQueryInsertError(e)))
                         .setCoder(FAILSAFE_ELEMENT_CODER);
 
-        /*
-         * Step #4: Write records that failed table row transformation
-         * or conversion out to BigQuery deadletter table.
-         */
         PCollectionList.of(
                         ImmutableList.of(
                                 convertedTableRows.get(UDF_DEADLETTER_OUT),
@@ -416,7 +368,6 @@ public class PubSubToBigQuery {
                                 .setErrorRecordsTableSchema(ResourceUtils.getDeadletterTableSchemaJson())
                                 .build());
 
-        // 5) Insert records that failed insert into deadletter table
         failedInserts.apply(
                 "WriteFailedRecords",
                 ErrorConverters.WriteStringMessageErrors.newBuilder()
@@ -439,6 +390,7 @@ public class PubSubToBigQuery {
 
         return pipeline.run();
     }
+
 
     /**
      * The {@link PubsubMessageToTableRow} class is a {@link PTransform} which transforms incoming
