@@ -82,38 +82,52 @@ import org.slf4j.LoggerFactory;
 
 /**
  * The {@link PubSubToBigQuery} pipeline is a streaming pipeline which ingests data in JSON format
- * from Cloud Pub/Sub, executes a JSON transformation, and outputs the resulting records to BigQuery. Any errors
- * which occur in the transformation of the data or execution of the UDF will be output to a
- * separate errors table in BigQuery. The errors table will be created if it does not exist prior to
- * execution. Both output and error tables are specified by the user as template parameters.
+ * from Cloud Pub/Sub, converts the data to {@link TableRow} objects, filters the data based on a
+ * lookup table in BigQuery, and outputs the resulting records to BigQuery. The main output is written
+ * to one table, while the filtered output is written to another. Any errors which occur in the
+ * conversion to {@link TableRow} objects will be output to separate error tables in BigQuery for
+ * the main output and filtered output. The errors tables will be created if they do not exist prior to
+ * execution. The main output table, filtered output table, error tables, and lookup table are
+ * all specified by the user as template parameters.
+ *
  *
  * <p><b>Pipeline Requirements</b>
  *
- * <ul>
- *   <li>The Pub/Sub topic exists.
- *   <li>The BigQuery output table exists.
- * </ul>
  *
- * <p>Check out <a
- * href="https://github.com/GoogleCloudPlatform/DataflowTemplates/blob/main/v2/googlecloud-to-googlecloud/README_PubSub_to_BigQuery_Flex.md">README</a>
- * for instructions on how to use or modify this template.
+ *
+ * <ul>
+ *
+ *
+ * <li>The Pub/Sub topic exists.
+ *
+ *
+ * <li>The BigQuery output table exists.
+ *
+ *
+ * <li>The BigQuery filtered output table exists.
+ *
+ *
+ * <li>The BigQuery lookup table exists.
+ *
+ *
+ * </ul>
  */
 @Template(
         name = "PubSub_to_BigQuery_Flex",
         category = TemplateCategory.STREAMING,
-        displayName = "Pub/Sub to BigQuery",
-        description =
-                "The Pub/Sub to BigQuery template is a streaming pipeline that reads JSON-formatted messages from a Pub/Sub topic or subscription, and writes them to a BigQuery table. "
-                        + "You can use the template as a quick solution to move Pub/Sub data to BigQuery. "
-                        + "The template reads JSON-formatted messages from Pub/Sub and converts them to BigQuery elements.",
+        displayName = "Pub/Sub to BigQuery with Filtering",
+        description = "This streaming pipeline reads JSON-formatted messages from a Pub/Sub topic or subscription, " +
+                "converts them to BigQuery TableRow objects, filters the data based on a BigQuery lookup table, " +
+                "and writes the resulting records to two separate BigQuery tables - one for the main output and one for the filtered output. " +
+                "Any conversion errors are written to separate error tables in BigQuery.",
         optionsClass = Options.class,
         flexContainerName = "pubsub-to-bigquery",
-        documentation =
-                "https://cloud.google.com/dataflow/docs/guides/templates/provided/pubsub-to-bigquery",
+        documentation = "https://cloud.google.com/dataflow/docs/guides/templates/provided-streaming/pubsub-to-bigquery-with-filtering",
         contactInformation = "https://cloud.google.com/support",
         requirements = {
-                "The <a href=\"https://cloud.google.com/pubsub/docs/reference/rest/v1/PubsubMessage\">`data` field</a> of Pub/Sub messages must use the JSON format, described in this <a href=\"https://developers.google.com/api-client-library/java/google-http-java-client/json\">JSON guide</a>. For example, messages with values in the `data` field formatted as `{\"k1\":\"v1\", \"k2\":\"v2\"}` can be inserted into a BigQuery table with two columns, named `k1` and `k2`, with a string data type.",
-                "The output table must exist prior to running the pipeline. The table schema must match the input JSON objects."
+                "The <a href=\"https://cloud.google.com/pubsub/docs/reference/rest/v1/PubsubMessage\">`data` field</a> of Pub/Sub messages must use the JSON format, described in this <a href=\"https://developers.google.com/api-client-library/java/google-http-java-client/json\">JSON guide</a>. For example, messages with values in the data field formatted as {\"k1\":\"v1\", \"k2\":\"v2\"} can be inserted into a BigQuery table with two columns, named k1 and k2, with a string data type.",
+                "The main output table, filtered output table, and lookup table must exist in BigQuery prior to running the pipeline. The schema of the output tables must match the input JSON objects.",
+                "Deadletter tables for the main output and filtered output will be created if they do not exist prior to running the pipeline."
         },
         streaming = true)
 public class PubSubToBigQuery {
@@ -184,6 +198,7 @@ public class PubSubToBigQuery {
                 description = "BigQuery output table",
                 helpText = "BigQuery table location to write the output to. The table’s schema must match the input JSON objects.")
         String getOutputTableSpec();
+
         void setOutputTableSpec(String value);
 
         @TemplateParameter.BigQueryTable(
@@ -191,6 +206,7 @@ public class PubSubToBigQuery {
                 description = "BigQuery filtered output table",
                 helpText = "BigQuery table location to write the filtered output to. The table’s schema must match the input JSON objects.")
         String getOutputFilteredTableSpec();
+
         void setOutputFilteredTableSpec(String value);
 
         @TemplateParameter.PubsubTopic(
@@ -199,6 +215,7 @@ public class PubSubToBigQuery {
                 description = "Input Pub/Sub topic",
                 helpText = "The Pub/Sub topic to read the input from.")
         String getInputTopic();
+
         void setInputTopic(String value);
 
         @TemplateParameter.PubsubSubscription(
@@ -207,6 +224,7 @@ public class PubSubToBigQuery {
                 description = "Pub/Sub input subscription",
                 helpText = "Pub/Sub subscription to read the input from, in the format of 'projects/your-project-id/subscriptions/your-subscription-name'")
         String getInputSubscription();
+
         void setInputSubscription(String value);
 
         @TemplateParameter.BigQueryTable(
@@ -215,6 +233,7 @@ public class PubSubToBigQuery {
                 description = "Table for messages failed to reach the output table (i.e., Deadletter table)",
                 helpText = "BigQuery table for failed messages. Messages failed to reach the output table for different reasons (e.g., mismatched schema, malformed json) are written to this table. If it doesn't exist, it will be created during pipeline execution. If not specified, \"outputTableSpec_error_records\" is used instead.")
         String getOutputDeadletterTable();
+
         void setOutputDeadletterTable(String value);
 
         @TemplateParameter.BigQueryTable(
@@ -223,6 +242,7 @@ public class PubSubToBigQuery {
                 description = "Deadletter Table for filtered messages failed to reach the filtered output table (i.e., Deadletter table)",
                 helpText = "BigQuery table for failed messages. Messages failed to reach the output table for different reasons (e.g., mismatched schema, malformed json) are written to this table. If it doesn't exist, it will be created during pipeline execution. If not specified, \"outputTableSpec_error_records\" is used instead.")
         String getOutputFilteredDeadletterTable();
+
         void setOutputFilteredDeadletterTable(String value);
 
         @TemplateParameter.BigQueryTable(
@@ -230,6 +250,7 @@ public class PubSubToBigQuery {
                 description = "BigQuery table to query QA users",
                 helpText = "The BigQuery table to read data from periodically.")
         String getTableToQuery();
+
         void setTableToQuery(String value);
     }
 
@@ -438,7 +459,7 @@ public class PubSubToBigQuery {
                                             .setFailureTag(UDF_DEADLETTER_OUT)
                                             .build());
 
-            // Convert the records which were successfully processed by the UDF into TableRow objects.
+            // Convert the records which were successfully processed by the parsing function into TableRow objects.
             PCollectionTuple jsonToTableRowOut =
                     udfOut
                             .get(UDF_OUT)
