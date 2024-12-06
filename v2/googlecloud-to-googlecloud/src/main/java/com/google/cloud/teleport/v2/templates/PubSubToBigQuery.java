@@ -28,10 +28,8 @@ import com.google.cloud.teleport.v2.options.BigQueryStorageApiStreamingOptions;
 import com.google.cloud.teleport.v2.templates.PubSubToBigQuery.Options;
 import com.google.cloud.teleport.v2.transforms.BigQueryConverters.FailsafeJsonToTableRow;
 import com.google.cloud.teleport.v2.transforms.ErrorConverters;
-import com.google.cloud.teleport.v2.transforms.JavascriptTextTransformer.FailsafeJavascriptUdf;
-import com.google.cloud.teleport.v2.transforms.PythonExternalTextTransformer;
+import com.google.cloud.teleport.v2.transforms.JSONTransformer;
 import com.google.cloud.teleport.v2.transforms.PythonExternalTextTransformer.PythonExternalTextTransformerOptions;
-import com.google.cloud.teleport.v2.transforms.PythonExternalTextTransformer.RowToPubSubFailsafeElementFn;
 import com.google.cloud.teleport.v2.utils.BigQueryIOUtils;
 import com.google.cloud.teleport.v2.utils.ResourceUtils;
 import com.google.cloud.teleport.v2.values.FailsafeElement;
@@ -63,9 +61,7 @@ import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PCollectionTuple;
-import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.sdk.values.TupleTagList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -420,53 +416,18 @@ public class PubSubToBigQuery {
 
     @Override
     public PCollectionTuple expand(PCollection<PubsubMessage> input) {
-      boolean useJavascriptUdf =
-          !Strings.isNullOrEmpty(options.getJavascriptTextTransformGcsPath());
-      boolean usePythonUdf =
-          !Strings.isNullOrEmpty(options.getPythonExternalTextTransformGcsPath());
-      if (useJavascriptUdf && usePythonUdf) {
-        throw new IllegalArgumentException(
-            "Either javascript or Python gcs path must be provided, but not both.");
-      }
       PCollectionTuple udfOut;
-      if (usePythonUdf) {
-        PCollection<Row> udfRowsOut =
-            input
-                // Map the incoming messages into FailsafeElements so we can recover from failures
-                // across multiple transforms.
-                .apply(
-                    "MapToRecord",
-                    PythonExternalTextTransformer.FailsafeRowPythonExternalUdf
-                        .pubSubMappingFunction())
-                .setRowSchema(PythonExternalTextTransformer.FailsafeRowPythonExternalUdf.ROW_SCHEMA)
-                .apply(
-                    "InvokeUDF",
-                    PythonExternalTextTransformer.FailsafePythonExternalUdf.newBuilder()
-                        .setFileSystemPath(options.getPythonExternalTextTransformGcsPath())
-                        .setFunctionName(options.getPythonExternalTextTransformFunctionName())
-                        .build());
-        udfOut =
-            udfRowsOut.apply(
-                "MapRowsToFailsafeElements",
-                ParDo.of(new RowToPubSubFailsafeElementFn(UDF_OUT, UDF_DEADLETTER_OUT))
-                    .withOutputTags(UDF_OUT, TupleTagList.of(UDF_DEADLETTER_OUT)));
-      } else {
-        udfOut =
-            input
-                // Map the incoming messages into FailsafeElements so we can recover from failures
-                // across multiple transforms.
-                .apply("MapToRecord", ParDo.of(new PubsubMessageToFailsafeElementFn()))
-                .apply(
-                    "InvokeUDF",
-                    FailsafeJavascriptUdf.<PubsubMessage>newBuilder()
-                        .setFileSystemPath(options.getJavascriptTextTransformGcsPath())
-                        .setFunctionName(options.getJavascriptTextTransformFunctionName())
-                        .setReloadIntervalMinutes(
-                            options.getJavascriptTextTransformReloadIntervalMinutes())
-                        .setSuccessTag(UDF_OUT)
-                        .setFailureTag(UDF_DEADLETTER_OUT)
-                        .build());
-      }
+      udfOut =
+          input
+              // Map the incoming messages into FailsafeElements so we can recover from failures
+              // across multiple transforms.
+              .apply("MapToRecord", ParDo.of(new PubsubMessageToFailsafeElementFn()))
+              .apply(
+                  "InvokeJSONTransformer",
+                  JSONTransformer.<PubsubMessage>newBuilder()
+                      .setSuccessTag(UDF_OUT)
+                      .setFailureTag(UDF_DEADLETTER_OUT)
+                      .build());
 
       // Convert the records which were successfully processed by the UDF into TableRow objects.
       PCollectionTuple jsonToTableRowOut =
