@@ -54,7 +54,8 @@ public class PubsubToBigQueryTest {
   @Test
   public void testPubsubToBigQueryE2E() throws Exception {
     // Test input
-    final String payload = "{\"ticker\": \"GOOGL\", \"price\": 1006.94}";
+    final String payload =
+        "{\"ticker\": \"GOOGL\", \"price\": 1006.94, \"event_timestamp\": 1698179812609,\"revenue\":0.001400002330012, \"server_timestamp\": 1698179812994015, \"events\": \"{\\\"ad_unit\\\":\\\"banner\\\",\\\"error_code\\\":601,\\\"error_type\\\":\\\"Init() had failed\\\",\\\"revenue\\\":0.001400002330012}\"}";
     final PubsubMessage message =
         new PubsubMessage(payload.getBytes(), ImmutableMap.of("id", "123", "type", "custom_event"));
 
@@ -70,8 +71,6 @@ public class PubsubToBigQueryTest {
     // Parameters
     PubSubToBigQuery.Options options =
         PipelineOptionsFactory.create().as(PubSubToBigQuery.Options.class);
-    options.setJavascriptTextTransformGcsPath(TRANSFORM_FILE_PATH);
-    options.setJavascriptTextTransformFunctionName("transform");
 
     // Build pipeline
     PCollectionTuple transformOut =
@@ -90,7 +89,16 @@ public class PubsubToBigQueryTest {
             collection -> {
               TableRow result = collection.iterator().next();
               assertThat(result.get("ticker"), is(equalTo("GOOGL")));
-              assertThat(result.get("price"), is(equalTo(1006.94)));
+              assertThat(result.get("price"), is(equalTo("1006.94")));
+              assertThat(result.get("revenue"), is(equalTo("0.001400002330012")));
+              assertThat(result.get("event_timestamp"), is(equalTo("2023-10-24T20:36:52.609Z")));
+              assertThat(
+                  result.get("server_timestamp"), is(equalTo("2023-10-24T20:36:52.994015Z")));
+              assertThat(
+                  result.get("events"),
+                  is(
+                      equalTo(
+                          "{\"ad_unit\":\"banner\",\"error_code\":601,\"error_type\":\"Init() had failed\",\"revenue\":0.001400002330012}")));
               return null;
             });
 
