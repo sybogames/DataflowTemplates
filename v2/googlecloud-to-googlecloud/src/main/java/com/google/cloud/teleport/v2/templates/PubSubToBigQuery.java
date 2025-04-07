@@ -331,6 +331,7 @@ public class PubSubToBigQuery {
             .apply(
                 "WriteSuccessfulRecords",
                 BigQueryIO.writeTableRows()
+                    .withAutoSharding()
                     .withoutValidation()
                     .withCreateDisposition(CreateDisposition.CREATE_NEVER)
                     .withWriteDisposition(WriteDisposition.WRITE_APPEND)
