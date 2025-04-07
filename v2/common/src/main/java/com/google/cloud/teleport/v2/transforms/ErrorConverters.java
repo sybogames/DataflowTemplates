@@ -251,6 +251,7 @@ public class ErrorConverters {
           .apply(
               "WriteFailedRecordsToBigQuery",
               BigQueryIO.writeTableRows()
+                  .withAutoSharding()
                   .to(getErrorRecordsTable())
                   .withJsonSchema(getErrorRecordsTableSchema())
                   .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
@@ -284,6 +285,7 @@ public class ErrorConverters {
           .apply(
               "WriteFailedRecordsToBigQuery",
               BigQueryIO.writeTableRows()
+                  .withAutoSharding()
                   .to(getErrorRecordsTable())
                   .withJsonSchema(getErrorRecordsTableSchema())
                   .withCreateDisposition(CreateDisposition.CREATE_IF_NEEDED)
